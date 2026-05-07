@@ -1,0 +1,5 @@
+# Carpeta para modelos entrenados.
+# Después del entrenamiento contendrá:
+#   hoodnet_final.pt   → modelo PyTorch
+#   hood_model.onnx    → modelo ONNX para producción
+#   loocv_results.json → métricas de validación cruzada
