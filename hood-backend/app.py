@@ -70,7 +70,7 @@ ZONE_NAMES = [
 
 DAMAGE_TYPES = [
     "delaminacion", "abrasion",    "rayado",      "brunido",
-    "picado",       "residuos",    "deformacion", "fatiga",
+    "picado",       "residuos",    "deformacion",
 ]
 
 LANDMARK_NAMES = ["TL", "TR", "BL", "BR", "MC", "LC", "IG"]
@@ -180,13 +180,36 @@ def read_log_tail(n_lines: int = 25) -> str:
     return "(sin log aún)"
 
 
+def _get_image_type(img_name: str) -> str:
+    """Detecta si la imagen es de arriba (_aE) o abajo (_bE)."""
+    if img_name.endswith("_aE.png"):
+        return "arriba"
+    elif img_name.endswith("_bE.png"):
+        return "abajo"
+    else:
+        return "arriba"  # Por defecto
+
+
 def _default_annotation(img_name: str) -> dict:
-    """Genera una anotación vacía por defecto."""
-    return {
-        "knee_side":     "derecha",
-        "landmarks":     {lm: [0.0, 0.0] for lm in LANDMARK_NAMES},
-        "damage_scores": {f"zona_{z}": [0] * 8 for z in range(10)},
-    }
+    """Genera una anotación vacía por defecto según el tipo de imagen."""
+    img_type = _get_image_type(img_name)
+    
+    if img_type == "abajo":
+        # Para vista inferior: 4 puntos (AM, AL, PM, PL)
+        return {
+            "knee_side":     "derecha",
+            "image_type":    "abajo",
+            "landmarks":     {lm: [0.0, 0.0] for lm in ["AM", "AL", "PM", "PL"]},
+            "damage_scores": {f"zona_{z}": [0] * 7 for z in range(4)},
+        }
+    else:
+        # Para vista superior: 7 landmarks Hood estándar
+        return {
+            "knee_side":     "derecha",
+            "image_type":    "arriba",
+            "landmarks":     {lm: [0.0, 0.0] for lm in LANDMARK_NAMES},
+            "damage_scores": {f"zona_{z}": [0] * 7 for z in range(10)},
+        }
 
 
 def zone_centers_to_landmarks(zone_centers: dict, img_w: int, img_h: int) -> dict:
@@ -252,6 +275,25 @@ def landmarks_to_zone_centers(landmarks: dict) -> dict:
         return centers
     except Exception:
         return {f"zona_{i}": [0.0, 0.0] for i in range(10)}
+
+
+def four_landmarks_to_zone_centers(landmarks: dict) -> dict:
+    """
+    Obtiene los 4 centros de zona a partir de los 4 landmarks (AM, AL, PM, PL).
+    Usa FourZoneComputer para calcular los bboxes y toma sus centros.
+    """
+    try:
+        sys.path.insert(0, str(ROOT))
+        from api.four_zone_computer import FourZoneComputer
+        zc = FourZoneComputer(landmarks)
+        centers = {}
+        zone_names = ["AM", "AL", "PM", "PL"]
+        for i in range(4):
+            x1, y1, x2, y2 = zc.get_zone_bbox(i)
+            centers[f"zona_{i}"] = [float((x1 + x2) / 2), float((y1 + y2) / 2)]
+        return centers
+    except Exception:
+        return {f"zona_{i}": [0.0, 0.0] for i in range(4)}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -399,6 +441,8 @@ with tab_datos:
             if knee_side_key not in st.session_state:
                 st.session_state[knee_side_key] = current_ann.get("knee_side", "derecha")
 
+            img_type_info = _get_image_type(selected_img)
+            
             ks_col, ks_hint = st.columns([1, 2])
             with ks_col:
                 knee_side = st.radio(
@@ -411,17 +455,23 @@ with tab_datos:
                 )
                 st.session_state[knee_side_key] = knee_side
             with ks_hint:
-                if knee_side == "derecha":
-                    st.info(
-                        "Rodilla **derecha**: "
-                        "cóndilo **medial** (zonas 0-3, 8) → lado **izquierdo** ◀ de la imagen  \n"
-                        "cóndilo **lateral** (zonas 4-7, 9) → lado **derecho** ▶ de la imagen"
-                    )
+                if img_type_info == "arriba":
+                    if knee_side == "derecha":
+                        st.info(
+                            "Rodilla **derecha** (parte arriba): "
+                            "cóndilo **medial** → lado **izquierdo** ◀  \n"
+                            "cóndilo **lateral** → lado **derecho** ▶"
+                        )
+                    else:
+                        st.info(
+                            "Rodilla **izquierda** (parte arriba): "
+                            "cóndilo **medial** → lado **derecho** ▶  \n"
+                            "cóndilo **lateral** → lado **izquierdo** ◀"
+                        )
                 else:
                     st.info(
-                        "Rodilla **izquierda**: "
-                        "cóndilo **medial** (zonas 0-3, 8) → lado **derecho** ▶ de la imagen  \n"
-                        "cóndilo **lateral** (zonas 4-7, 9) → lado **izquierdo** ◀ de la imagen"
+                        "📷 Imagen de la **parte inferior (_bE)** de la prótesis  \n"
+                        "Segmentación en 4 cuadrantes: AM, AL, PM, PL"
                     )
 
             # ── Cargar imagen al inicio para tener dimensiones disponibles ──
@@ -430,25 +480,28 @@ with tab_datos:
             img_rgb_orig  = None
             w_orig = h_orig = 0
             if img_available and _CV2_AVAILABLE:
-                img_bgr = cv2_.imread(str(img_path))
-                if img_bgr is not None:
-                    img_rgb_orig = cv2_.cvtColor(img_bgr, cv2_.COLOR_BGR2RGB)
-                    h_orig, w_orig = img_rgb_orig.shape[:2]
-                else:
-                    img_available = False
+                img_bgr      = cv2_.imread(str(img_path))
+                img_rgb_orig = cv2_.cvtColor(img_bgr, cv2_.COLOR_BGR2RGB)
+                h_orig, w_orig = img_rgb_orig.shape[:2]
 
             # ── Estado de sesión por imagen ────────────────────────────────
-            lm_key     = f"lm_coords_{selected_img}"   # zona_0..zona_9 centers
-            active_key = f"lm_active_{selected_img}"   # int 0-9
+            lm_key     = f"lm_coords_{selected_img}"   # zona_0..zona_N centers
+            active_key = f"lm_active_{selected_img}"   # int 0-9 o 0-3
             auto_key   = f"lm_auto_{selected_img}"
+            img_type_current = _get_image_type(selected_img)
 
             if lm_key not in st.session_state:
                 existing_lms = current_ann.get("landmarks", {})
                 if any(any(v != 0 for v in coords) for coords in existing_lms.values()):
-                    # Hay landmarks anatómicos guardados → convertir a centros de zona
-                    st.session_state[lm_key] = landmarks_to_zone_centers(existing_lms)
+                    # Hay landmarks guardados → convertir a centros de zona
+                    if img_type_current == "abajo":
+                        st.session_state[lm_key] = four_landmarks_to_zone_centers(existing_lms)
+                    else:
+                        st.session_state[lm_key] = landmarks_to_zone_centers(existing_lms)
                 else:
-                    st.session_state[lm_key] = {f"zona_{i}": [0.0, 0.0] for i in range(10)}
+                    # Inicializar según tipo
+                    num_zones = 4 if img_type_current == "abajo" else 10
+                    st.session_state[lm_key] = {f"zona_{i}": [0.0, 0.0] for i in range(num_zones)}
                 st.session_state[auto_key] = False
             if active_key not in st.session_state:
                 st.session_state[active_key] = 0
@@ -493,31 +546,74 @@ with tab_datos:
 
             zone_centers = st.session_state[lm_key]
             active_idx   = st.session_state[active_key]
+            img_type     = _get_image_type(selected_img)
+            
+            # Definir landmarks según el tipo de imagen
+            if img_type == "abajo":
+                landmark_labels = {
+                    "zona_0": "0 · AM (Anteromedial)",
+                    "zona_1": "1 · AL (Anterolateral)",
+                    "zona_2": "2 · PM (Posteromedial)",
+                    "zona_3": "3 · PL (Posterolateral)",
+                }
+                max_zones = 4
+            else:
+                landmark_labels = ZONE_CLICK_LABELS
+                max_zones = 10
+
+            # Reiniciar active_idx si está fuera del rango válido
+            if active_idx >= max_zones:
+                active_idx = 0
+                st.session_state[active_key] = 0
+
             active_zone  = f"zona_{active_idx}"
 
-            # ── Botones de selección de zona (2 filas de 5) ───────────────
-            st.write("**📍 Zonas Hood** — pulsa la zona que quieres marcar, luego haz clic en su centro en la imagen:")
-            for row_start in [0, 5]:
-                btn_cols = st.columns(5)
-                for col_i, zone_i in enumerate(range(row_start, row_start + 5)):
-                    zn        = f"zona_{zone_i}"
-                    coords    = zone_centers.get(zn, [0.0, 0.0])
-                    has_coord = any(v != 0 for v in coords)
-                    with btn_cols[col_i]:
-                        if st.button(
-                            f"{'✅' if has_coord else '⬜'} {zone_i}",
-                            key=f"lmbtn_{zn}_{selected_img}",
-                            type="primary" if zone_i == active_idx else "secondary",
-                            use_container_width=True,
-                            help=ZONE_CLICK_LABELS[zn],
-                        ):
-                            st.session_state[active_key] = zone_i
-                            st.rerun()
+            # ── Botones de selección de zona ───────────────────────────────
+            st.write(f"**📍 Puntos de segmentación** — pulsa el punto que quieres marcar, luego haz clic en su ubicación:")
+            if max_zones == 4:
+                # Para 4 puntos: mostrar en 2×2
+                for row_start in [0, 2]:
+                    btn_cols = st.columns(2)
+                    for col_i, zone_i in enumerate(range(row_start, row_start + 2)):
+                        zn        = f"zona_{zone_i}"
+                        coords    = zone_centers.get(zn, [0.0, 0.0])
+                        has_coord = any(v != 0 for v in coords)
+                        with btn_cols[col_i]:
+                            if st.button(
+                                f"{'✅' if has_coord else '⬜'} {zone_i}",
+                                key=f"lmbtn_{zn}_{selected_img}",
+                                type="primary" if zone_i == active_idx else "secondary",
+                                use_container_width=True,
+                                help=landmark_labels[zn],
+                            ):
+                                st.session_state[active_key] = zone_i
+                                st.rerun()
+            else:
+                # Para 10 zonas: mostrar en 2 filas de 5
+                for row_start in [0, 5]:
+                    btn_cols = st.columns(5)
+                    for col_i, zone_i in enumerate(range(row_start, row_start + 5)):
+                        zn        = f"zona_{zone_i}"
+                        coords    = zone_centers.get(zn, [0.0, 0.0])
+                        has_coord = any(v != 0 for v in coords)
+                        with btn_cols[col_i]:
+                            if st.button(
+                                f"{'✅' if has_coord else '⬜'} {zone_i}",
+                                key=f"lmbtn_{zn}_{selected_img}",
+                                type="primary" if zone_i == active_idx else "secondary",
+                                use_container_width=True,
+                                help=ZONE_CLICK_LABELS[zn],
+                            ):
+                                st.session_state[active_key] = zone_i
+                                st.rerun()
 
             c_info, c_reset = st.columns([4, 1])
-            c_info.info(f"🎯 Marcando: **{active_zone}** — {ZONE_CLICK_LABELS[active_zone]}")
+            if img_type == "abajo":
+                c_info.info(f"🎯 Marcando: **{landmark_labels[active_zone]}")
+            else:
+                c_info.info(f"🎯 Marcando: **{active_zone}** — {ZONE_CLICK_LABELS[active_zone]}")
             if c_reset.button("🔄 Reset", key=f"reset_lm_{selected_img}", use_container_width=True):
-                st.session_state[lm_key]    = {f"zona_{i}": [0.0, 0.0] for i in range(10)}
+                st.session_state[lm_key]    = {f"zona_{i}": [0.0, 0.0] for i in range(max_zones)}
                 st.session_state[active_key] = 0
                 st.rerun()
 
@@ -584,41 +680,62 @@ with tab_datos:
                                 st.session_state[active_key] = active_idx + 1
                             st.rerun()
 
-                # ── Panel derecho: visualización de zonas Hood ──────────
+                # ── Panel derecho: visualización de zonas ──────────
                 with col_zones:
+                    img_type_vis = _get_image_type(selected_img)
+                    max_zones_vis = 4 if img_type_vis == "abajo" else 10
+                    min_zones_to_show = 2 if img_type_vis == "abajo" else 4
+                    
                     n_placed = sum(
-                        1 for i in range(10)
+                        1 for i in range(max_zones_vis)
                         if any(v != 0 for v in zone_centers.get(f"zona_{i}", [0, 0]))
                     )
-                    if n_placed >= 4:
-                        st.caption("🗺️ Zonas Hood segmentadas (vista previa)")
+                    if n_placed >= min_zones_to_show:
+                        st.caption("🗺️ Zonas segmentadas (vista previa)")
                         try:
-                            from api.zone_computer import HoodZoneComputer
-                            derived_lms = zone_centers_to_landmarks(zone_centers, w_orig, h_orig)
-                            zc  = HoodZoneComputer(derived_lms)
+                            if img_type_vis == "abajo":
+                                from api.four_zone_computer import FourZoneComputer
+                                # Convertir zona_X a nombres de landmarks (AM, AL, PM, PL)
+                                four_zone_names = {
+                                    "zona_0": "AM",
+                                    "zona_1": "AL", 
+                                    "zona_2": "PM",
+                                    "zona_3": "PL",
+                                }
+                                four_lms = {
+                                    four_zone_names[f"zona_{i}"]: zone_centers.get(f"zona_{i}", [0, 0])
+                                    for i in range(4)
+                                }
+                                zc = FourZoneComputer(four_lms, image_rgb=img_rgb_orig)
+                            else:
+                                from api.zone_computer import HoodZoneComputer
+                                derived_lms = zone_centers_to_landmarks(zone_centers, w_orig, h_orig)
+                                zc = HoodZoneComputer(derived_lms)
+                            
                             vis = zc.draw_zones(img_rgb_orig)
-                            # Superponer centros de zona cliqueados como puntos pequeños
-                            for zi in range(10):
+                            # Superponer centros de zona cliqueados
+                            for zi in range(max_zones_vis):
                                 coords = zone_centers.get(f"zona_{zi}", [0.0, 0.0])
                                 if any(v != 0 for v in coords):
                                     cx_ = int(coords[0]); cy_ = int(coords[1])
                                     cv2_.circle(vis, (cx_, cy_), 5, (255, 255, 255), -1)
-                                    cv2_.circle(vis, (cx_, cy_), 3, ZONE_CV_COLORS[zi], -1)
+                                    col = (255, 0, 0) if zi < max_zones_vis else (100, 100, 100)
+                                    cv2_.circle(vis, (cx_, cy_), 3, col, -1)
                             vis_disp = cv2_.resize(vis, (DISP_W, disp_h))
                             st.image(vis_disp, use_container_width=True)
                             st.caption(
-                                f"{n_placed}/10 zonas marcadas · "
-                                f"{'Segmentación completa ✅' if n_placed == 10 else 'Segmentación parcial ⚠️'}"
+                                f"{n_placed}/{max_zones_vis} zonas marcadas · "
+                                f"{'Segmentación completa ✅' if n_placed == max_zones_vis else 'Segmentación parcial ⚠️'}"
                             )
                         except Exception as ez:
                             st.warning(f"No se puede mostrar zonas: {ez}")
                             st.image(img_disp, use_container_width=True)
                     else:
-                        st.caption("🗺️ Zonas Hood (visible con ≥ 4 zonas marcadas)")
+                        st.caption("🗺️ Zonas segmentadas")
                         st.image(img_disp, use_container_width=True)
                         st.info(
-                            f"Marca {4 - n_placed} zona(s) más para ver la segmentación. "
-                            f"Ya tienes: {n_placed}/10"
+                            f"Marca {min_zones_to_show - n_placed} zona(s) más para ver la segmentación. "
+                            f"Ya tienes: {n_placed}/{max_zones_vis}"
                         )
 
             elif not img_available:
@@ -629,46 +746,105 @@ with tab_datos:
             else:
                 st.warning("OpenCV no disponible: `pip install opencv-python`")
 
+            # Calcular número de zonas marcadas
+            img_type_crop = _get_image_type(selected_img)
+            max_zones_crop = 4 if img_type_crop == "abajo" else 10
+            n_placed = sum(
+                1 for i in range(max_zones_crop)
+                if any(v != 0 for v in zone_centers.get(f"zona_{i}", [0, 0]))
+            )
+
             # Derivar landmarks anatómicos desde zone centers para guardar en annotations.json
             if w_orig > 0:
-                new_lms = zone_centers_to_landmarks(zone_centers, w_orig, h_orig)
+                if img_type_crop == "abajo":
+                    # Para abajo, convertir zona_X a AM, AL, PM, PL
+                    four_zone_names = {
+                        "zona_0": "AM",
+                        "zona_1": "AL",
+                        "zona_2": "PM",
+                        "zona_3": "PL",
+                    }
+                    new_lms = {
+                        four_zone_names[f"zona_{i}"]: zone_centers.get(f"zona_{i}", [0, 0])
+                        for i in range(4)
+                    }
+                else:
+                    new_lms = zone_centers_to_landmarks(zone_centers, w_orig, h_orig)
             else:
-                new_lms = {lm: [0.0, 0.0] for lm in LANDMARK_NAMES}
+                if img_type_crop == "abajo":
+                    new_lms = {lm: [0.0, 0.0] for lm in ["AM", "AL", "PM", "PL"]}
+                else:
+                    new_lms = {f"zona_{i}": [0.0, 0.0] for i in range(max_zones_crop)}
 
             # ── Vista de recortes por zona ──────────────────────────────────
-            if img_rgb_orig is not None and n_placed >= 4:
+            if img_rgb_orig is not None and n_placed >= 2:
                 try:
-                    from api.zone_computer import HoodZoneComputer
-                    derived_lms_crops = zone_centers_to_landmarks(zone_centers, w_orig, h_orig)
-                    zc_crops = HoodZoneComputer(derived_lms_crops)
-                    with st.expander("🔍 Recortes de cada zona (0 – 9)", expanded=(n_placed == 10)):
-                        for row_start in (0, 5):
-                            crop_cols = st.columns(5)
-                            for zi in range(row_start, row_start + 5):
+                    if img_type_crop == "abajo":
+                        from api.four_zone_computer import FourZoneComputer
+                        # Convertir zona_X a nombres de landmarks (AM, AL, PM, PL)
+                        four_zone_names = {
+                            "zona_0": "AM",
+                            "zona_1": "AL",
+                            "zona_2": "PM",
+                            "zona_3": "PL",
+                        }
+                        four_lms = {
+                            four_zone_names[f"zona_{i}"]: zone_centers.get(f"zona_{i}", [0, 0])
+                            for i in range(4)
+                        }
+                        zc_crops = FourZoneComputer(four_lms, image_rgb=img_rgb_orig)
+                        zone_names_crops = ["AM", "AL", "PM", "PL"]
+                        with st.expander("🔍 Recortes de cada zona (AM, AL, PM, PL)", expanded=(n_placed == 4)):
+                            crop_cols = st.columns(2)
+                            for zi in range(4):
                                 crop = zc_crops.get_zone_crop(img_rgb_orig, zi, output_size=320)
-                                with crop_cols[zi - row_start]:
+                                with crop_cols[zi % 2]:
                                     st.image(
                                         crop,
-                                        caption=f"Zona {zi} — {ZONE_NAMES[zi]}",
+                                        caption=f"Zona {zi} — {zone_names_crops[zi]}",
                                         use_container_width=True,
                                     )
+                    else:
+                        from api.zone_computer import HoodZoneComputer
+                        derived_lms_crops = zone_centers_to_landmarks(zone_centers, w_orig, h_orig)
+                        zc_crops = HoodZoneComputer(derived_lms_crops)
+                        with st.expander("🔍 Recortes de cada zona (0 – 9)", expanded=(n_placed == 10)):
+                            for row_start in (0, 5):
+                                crop_cols = st.columns(5)
+                                for zi in range(row_start, row_start + 5):
+                                    crop = zc_crops.get_zone_crop(img_rgb_orig, zi, output_size=320)
+                                    with crop_cols[zi - row_start]:
+                                        st.image(
+                                            crop,
+                                            caption=f"Zona {zi} — {ZONE_NAMES[zi]}",
+                                            use_container_width=True,
+                                        )
                 except Exception as e_crop:
                     st.caption(f"No se pueden mostrar recortes: {e_crop}")
 
             # ── Scores Hood (tabla editable) ────────────────────────────────
-            st.write("**Scores Hood** — 0 = sin daño · 1 = <10% · 2 = 10-50% · 3 = >50%")
+            st.write("**Scores de daño** — 0 = sin daño · 1 = <10% · 2 = 10-50% · 3 = >50%")
 
             score_data = current_ann.get("damage_scores", {})
+            img_type   = _get_image_type(selected_img)
 
-            # Construir DataFrame 10×8 con los valores actuales
+            # Detectar número de zonas dinámicamente
+            if img_type == "abajo":
+                num_zones = 4
+                zone_labels = ["AM", "AL", "PM", "PL"]
+            else:
+                num_zones = 10
+                zone_labels = ZONE_NAMES
+
+            # Construir DataFrame dinámico
             scores_matrix = []
-            for z in range(10):
-                row = score_data.get(f"zona_{z}", [0] * 8)
-                scores_matrix.append([int(v) for v in row[:8]])
+            for z in range(num_zones):
+                row = score_data.get(f"zona_{z}", [0] * 7)
+                scores_matrix.append([int(v) for v in row[:7]])
 
             df_scores = pd.DataFrame(
                 scores_matrix,
-                index=ZONE_NAMES,
+                index=zone_labels,
                 columns=DAMAGE_TYPES,
             )
 
@@ -685,15 +861,16 @@ with tab_datos:
                     for dmg in DAMAGE_TYPES
                 },
                 use_container_width=True,
-                height=420,
+                height=(180 if num_zones == 4 else 420),
                 key=f"scores_editor_{selected_img}",
             )
 
             # Score total calculado en tiempo real
             total_score = int(edited_df.values.sum())
-            pct         = total_score / 240 * 100
+            max_score   = 3 * 7 * num_zones  # 3 (máx) × 7 daños × número zonas
+            pct         = total_score / max_score * 100
             col_sc1, col_sc2, col_sc3 = st.columns(3)
-            col_sc1.metric("Score Hood total", f"{total_score} / 240")
+            col_sc1.metric("Score total", f"{total_score} / {max_score}")
             col_sc2.metric("Porcentaje de daño", f"{pct:.1f}%")
             col_sc3.metric(
                 "Nivel de daño",
@@ -704,15 +881,16 @@ with tab_datos:
                 anns_latest = load_annotations()
                 new_scores  = {
                     f"zona_{z}": edited_df.iloc[z].tolist()
-                    for z in range(10)
+                    for z in range(num_zones)
                 }
                 anns_latest[selected_img] = {
                     "knee_side":     st.session_state.get(knee_side_key, "derecha"),
+                    "image_type":    img_type,
                     "landmarks":     new_lms,
                     "damage_scores": new_scores,
                 }
                 save_annotations(anns_latest)
-                st.success(f"✅ Guardado: {selected_img}  (score {total_score}/240)")
+                st.success(f"✅ Guardado: {selected_img}  (score {total_score}/{max_score})")
 
 
 # ═════════════════════════════════════════════════════════════════════════════

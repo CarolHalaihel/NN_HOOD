@@ -172,22 +172,22 @@ class HoodNet(nn.Module):
     Clasificador de daño Hood por zona recortada de la bandeja tibial.
 
     Backbone: DINOv2 ViT-S/14 (Meta, 2023) completamente congelado.
-    Solo se entrenan 8 cabezas lineales: 8 × Linear(384→4) = 12.288 parámetros.
+    Solo se entrenan 7 cabezas lineales: 7 × Linear(384→4) = 10.752 parámetros.
     Esto permite entrenamiento en CPU en ~5 minutos con dataset de 30-40 imágenes.
 
     Entrada:  (B, 3, 224, 224)  — recorte de zona, normalizado ImageNet
-    Salida:   (B, 8, 4)          — logits para score 0/1/2/3 × 8 tipos de daño
+    Salida:   (B, 7, 4)          — logits para score 0/1/2/3 × 7 tipos de daño
 
-    Los 8 tipos de daño (en orden):
+    Los 7 tipos de daño (en orden):
       0: delaminacion  1: abrasion  2: rayado   3: brunido
-      4: picado        5: residuos  6: deformacion  7: fatiga
+      4: picado        5: residuos  6: deformacion
     """
 
     DAMAGE_TYPES = [
         "delaminacion", "abrasion", "rayado", "brunido",
-        "picado", "residuos", "deformacion", "fatiga",
+        "picado", "residuos", "deformacion",
     ]
-    NUM_DAMAGE  = 8
+    NUM_DAMAGE  = 7
     NUM_SCORES  = 4   # clases: 0, 1, 2, 3
     FEATURE_DIM = 384  # DINOv2 ViT-S/14
 

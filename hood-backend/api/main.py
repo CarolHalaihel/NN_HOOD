@@ -46,7 +46,7 @@ app = FastAPI(
     title="Hood NN — Análisis de desgaste en bandeja tibial",
     description=(
         "Sistema de cuantificación automática del daño superficial en implantes "
-        "de bandeja tibial de rodilla según el método Hood (10 zonas × 8 tipos de daño)."
+        "de bandeja tibial de rodilla según el método Hood (10 zonas × 7 tipos de daño)."
     ),
     version="1.0.0",
     docs_url="/docs",

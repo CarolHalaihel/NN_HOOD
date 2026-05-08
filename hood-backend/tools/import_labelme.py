@@ -151,7 +151,7 @@ def import_labelme_dir(
             if img_name not in annotations:
                 annotations[img_name] = {
                     "landmarks":     {lm: [0.0, 0.0] for lm in LANDMARK_NAMES},
-                    "damage_scores": {f"zona_{z}": [0] * 8 for z in range(10)},
+                    "damage_scores": {f"zona_{z}": [0] * 7 for z in range(10)},
                 }
 
             # Actualizar solo los landmarks encontrados

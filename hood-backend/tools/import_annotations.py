@@ -9,11 +9,11 @@ FORMATOS SOPORTADOS:
   Formato WIDE (recomendado, --format wide):
     Una fila por imagen. Columnas:
       imagen, landmark_TL_x, landmark_TL_y, ..., landmark_IG_y (14 cols de landmarks)
-      zona_0_delaminacion, ..., zona_9_fatiga (80 cols de scores)
+      zona_0_delaminacion, ..., zona_9_deformacion (70 cols de scores)
 
   Formato LONG (--format long):
     Una fila por (imagen, zona). Columnas:
-      imagen, zona_idx (0-9), delaminacion, abrasion, ..., fatiga
+      imagen, zona_idx (0-9), delaminacion, abrasion, ..., deformacion
     Los landmarks pueden estar en columnas opcionales (solo en la fila zona_idx=0).
 
 USO:
@@ -41,11 +41,11 @@ LANDMARK_NAMES = ["TL", "TR", "BL", "BR", "MC", "LC", "IG"]
 
 DAMAGE_TYPES = [
     "delaminacion", "abrasion",    "rayado",      "brunido",
-    "picado",       "residuos",    "deformacion", "fatiga",
+    "picado",       "residuos",    "deformacion",
 ]
 
 NUM_ZONES   = 10
-NUM_DAMAGES = 8
+NUM_DAMAGES = 7
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -64,7 +64,7 @@ def generate_template(output_path: Path) -> None:
     for lm in LANDMARK_NAMES:
         columns += [f"landmark_{lm}_x", f"landmark_{lm}_y"]
 
-    # Columnas de scores Hood (80 columnas: 10 zonas × 8 tipos de daño)
+    # Columnas de scores Hood (70 columnas: 10 zonas × 7 tipos de daño)
     for z in range(NUM_ZONES):
         for dmg in DAMAGE_TYPES:
             columns.append(f"zona_{z}_{dmg}")
@@ -112,7 +112,7 @@ def import_wide_format(df: pd.DataFrame) -> dict:
     Importa tabla wide: cada fila = una imagen completa con todas las zonas.
 
     Columnas esperadas:
-      imagen, landmark_TL_x, landmark_TL_y, ..., zona_0_delaminacion, ..., zona_9_fatiga
+      imagen, landmark_TL_x, landmark_TL_y, ..., zona_0_delaminacion, ..., zona_9_deformacion
     """
     annotations = {}
     errors = []

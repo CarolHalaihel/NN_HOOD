@@ -6,7 +6,7 @@ Incluye augmentación agresiva para dataset pequeño (~30-40 imágenes).
 
 Cada muestra contiene:
   - image         : tensor (3, H, W) normalizado ImageNet
-  - damage_scores : tensor (10, 8) long — scores 0-3 por zona y tipo de daño
+  - damage_scores : tensor (10, 7) long — scores 0-3 por zona y tipo de daño
   - landmarks     : tensor (7, 2) float — coords (x, y) normalizadas [0, 1]
   - image_name    : str — nombre del archivo (para trazabilidad en LOOCV)
 """
@@ -36,7 +36,7 @@ ZONE_NAMES = [
 
 DAMAGE_TYPES = [
     "delaminacion", "abrasion",    "rayado",      "brunido",
-    "picado",       "residuos",    "deformacion", "fatiga",
+    "picado",       "residuos",    "deformacion",
 ]
 
 LANDMARK_NAMES = ["TL", "TR", "BL", "BR", "MC", "LC", "IG"]
@@ -221,19 +221,19 @@ class TibialTrayDataset(Dataset):
             landmarks[i, 1] = float(y) / self.image_size
         landmarks = landmarks.clamp(0.0, 1.0)
 
-        # ── 4. Damage scores (10 zonas × 8 daños) ────────────────────────────
+        # ── 4. Damage scores (10 zonas × 7 daños) ────────────────────────────
         raw_scores    = ann.get("damage_scores", {})
-        damage_scores = torch.zeros(10, 8, dtype=torch.long)
+        damage_scores = torch.zeros(10, 7, dtype=torch.long)
         for zone_idx in range(10):
             key = f"zona_{zone_idx}"
             if key in raw_scores:
-                for dmg_idx, score in enumerate(raw_scores[key][:8]):
+                for dmg_idx, score in enumerate(raw_scores[key][:7]):
                     # Clamp a rango válido [0, 3]
                     damage_scores[zone_idx, dmg_idx] = int(max(0, min(3, int(score))))
 
         return {
             "image":         image_tensor,    # (3, H, W) float32
-            "damage_scores": damage_scores,   # (10, 8)   long
+            "damage_scores": damage_scores,   # (10, 7)   long
             "landmarks":     landmarks,       # (7, 2)    float32 en [0, 1]
             "image_name":    img_name,        # str
         }

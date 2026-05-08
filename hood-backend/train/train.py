@@ -33,7 +33,7 @@ from train.dataset import TibialTrayDataset, build_train_transform, build_val_tr
 
 DAMAGE_TYPES = [
     "delaminacion", "abrasion",    "rayado",      "brunido",
-    "picado",       "residuos",    "deformacion", "fatiga",
+    "picado",       "residuos",    "deformacion",
 ]
 
 
@@ -105,12 +105,12 @@ def train_one_epoch(
 
     for batch in loader:
         images  = batch["image"].to(device)                               # (B, 3, H, W)
-        targets = batch["damage_scores"][:, zone_idx, :].to(device)      # (B, 8)
+        targets = batch["damage_scores"][:, zone_idx, :].to(device)      # (B, 7)
 
         optimizer.zero_grad()
-        logits = model(images)  # (B, 8, 4)
+        logits = model(images)  # (B, 7, 4)
 
-        # Pérdida: suma de CrossEntropy sobre las 8 cabezas de daño
+        # Pérdida: suma de CrossEntropy sobre las 7 cabezas de daño
         loss = sum(
             criterion(logits[:, d, :], targets[:, d])
             for d in range(HoodNet.NUM_DAMAGE)
@@ -142,10 +142,10 @@ def evaluate_zone(
 
     for batch in loader:
         images  = batch["image"].to(device)
-        targets = batch["damage_scores"][:, zone_idx, :]  # (B, 8) — en CPU
+        targets = batch["damage_scores"][:, zone_idx, :]  # (B, 7) — en CPU
 
-        logits = model(images)                  # (B, 8, 4)
-        preds  = logits.argmax(dim=-1).cpu()    # (B, 8)
+        logits = model(images)                  # (B, 7, 4)
+        preds  = logits.argmax(dim=-1).cpu()    # (B, 7)
 
         all_preds.extend(preds.numpy().tolist())
         all_targets.extend(targets.numpy().tolist())

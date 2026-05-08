@@ -33,7 +33,7 @@ from api.zone_computer import HoodZoneComputer, ZONE_NAMES, LANDMARK_NAMES
 
 DAMAGE_TYPES = [
     "delaminacion", "abrasion",    "rayado",      "brunido",
-    "picado",       "residuos",    "deformacion", "fatiga",
+    "picado",       "residuos",    "deformacion",
 ]
 
 # Parámetros de normalización ImageNet (deben coincidir con dataset.py)
@@ -336,11 +336,11 @@ class HoodInferenceEngine:
           {
             "zones": {
               "medial_anterior": {"delaminacion": 0, "abrasion": 1, ...},
-              ...                                  (10 zonas × 8 tipos = 80 valores)
+              ...                                  (10 zonas × 7 tipos = 70 valores)
             },
             "total_hood_score": 42,            # suma total (0-240)
             "landmarks": {"TL": [x,y], ...},   # landmarks usados
-            "zone_scores_matrix": [[0,1,...], ...]  # lista 10 × 8 de ints
+            "zone_scores_matrix": [[0,1,...], ...]  # lista 10 × 7 de ints
           }
         """
         # ── 1. Detectar / recibir landmarks ──────────────────────────────────
@@ -366,10 +366,10 @@ class HoodInferenceEngine:
             input_tensor = preprocess_crop(crop, size=224)
 
             outputs = self.session.run(None, {"image": input_tensor})
-            logits  = outputs[0]  # (1, 8, 4)
+            logits  = outputs[0]  # (1, 7, 4)
 
             # Score = argmax sobre la dimensión de clases (0, 1, 2, 3)
-            scores = logits[0].argmax(axis=-1).tolist()  # lista de 8 ints
+            scores = logits[0].argmax(axis=-1).tolist()  # lista de 7 ints
 
             zone_scores[zone_name] = {
                 dmg: int(score)
