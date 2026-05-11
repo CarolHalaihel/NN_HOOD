@@ -22,18 +22,18 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader
 
 # Importaciones relativas al paquete hood-backend
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from train.model import HoodNet
-from train.dataset import TibialTrayDataset, build_train_transform, build_val_transform
+from train.dataset import ZoneCropDataset, load_base_samples, build_train_transform, build_val_transform
 
 DAMAGE_TYPES = [
-    "delaminacion", "abrasion",    "rayado",      "brunido",
-    "picado",       "residuos",    "deformacion",
+    "rayado",       "picado",      "brunido",     "abrasion",
+    "delaminacion", "deformacion", "residuos",
 ]
 
 
@@ -49,6 +49,37 @@ def _write_progress(path, data: dict) -> None:
         Path(path).write_text(json.dumps(data), encoding="utf-8")
     except Exception:
         pass
+
+
+def _save_checkpoint(checkpoint_file, data: dict) -> None:
+    """Guarda el estado de entrenamiento en disco para poder reanudarlo."""
+    if not checkpoint_file:
+        return
+    try:
+        torch.save(data, str(checkpoint_file))
+    except Exception as e:
+        print(f"[WARN] No se pudo guardar checkpoint: {e}", flush=True)
+
+
+def _load_checkpoint(checkpoint_file) -> dict:
+    """Carga el checkpoint previo. Retorna None si no existe o hay error."""
+    if not checkpoint_file:
+        return None
+    p = Path(checkpoint_file)
+    if not p.exists():
+        return None
+    try:
+        return torch.load(str(p), weights_only=False)
+    except Exception as e:
+        print(f"[WARN] No se pudo cargar checkpoint: {e}", flush=True)
+        return None
+
+
+def _should_stop(stop_file) -> bool:
+    """Retorna True si la webapp solicitó parada escribiendo el fichero bandera."""
+    if not stop_file:
+        return False
+    return Path(stop_file).exists()
 
 # Pesos para CrossEntropyLoss: compensa que score=0 es muy frecuente en implantes poco dañados
 # [score_0, score_1, score_2, score_3]
@@ -89,35 +120,28 @@ def train_one_epoch(
     optimizer: torch.optim.Optimizer,
     criterion: nn.CrossEntropyLoss,
     device: torch.device,
-    zone_idx: int,
 ) -> float:
     """
-    Entrena una época del HoodNet sobre la zona 'zone_idx'.
-
-    La imagen completa entra al modelo (el recorte de zona se hace en el dataset
-    o aquí se usa la imagen redimensionada directamente — HoodNet recibe la zona
-    ya recortada desde el DataLoader).
-
+    Entrena una época del HoodNet sobre recortes de zona.
+    Cada muestra ya es un recorte de una zona específica con sus 7 scores.
     Retorna la pérdida media de la época.
     """
     model.train()
     total_loss = 0.0
 
     for batch in loader:
-        images  = batch["image"].to(device)                               # (B, 3, H, W)
-        targets = batch["damage_scores"][:, zone_idx, :].to(device)      # (B, 7)
+        images  = batch["image"].to(device)           # (B, 3, H, W)
+        targets = batch["damage_scores"].to(device)   # (B, 7)
 
         optimizer.zero_grad()
         logits = model(images)  # (B, 7, 4)
 
-        # Pérdida: suma de CrossEntropy sobre las 7 cabezas de daño
         loss = sum(
             criterion(logits[:, d, :], targets[:, d])
             for d in range(HoodNet.NUM_DAMAGE)
         )
 
         loss.backward()
-        # Gradient clipping para estabilidad (importante con dataset pequeño)
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
 
@@ -131,18 +155,17 @@ def evaluate_zone(
     model: HoodNet,
     loader: DataLoader,
     device: torch.device,
-    zone_idx: int,
 ) -> tuple:
     """
-    Evalúa el modelo sobre todas las muestras del loader para la zona 'zone_idx'.
-    Retorna (lista_preds, lista_targets) — cada elemento es una lista de 8 scores.
+    Evalúa el modelo sobre recortes de zona.
+    Retorna (lista_preds, lista_targets) donde cada elemento tiene 7 scores.
     """
     model.eval()
     all_preds, all_targets = [], []
 
     for batch in loader:
         images  = batch["image"].to(device)
-        targets = batch["damage_scores"][:, zone_idx, :]  # (B, 7) — en CPU
+        targets = batch["damage_scores"]   # (B, 7) en CPU
 
         logits = model(images)                  # (B, 7, 4)
         preds  = logits.argmax(dim=-1).cpu()    # (B, 7)
@@ -159,48 +182,116 @@ def evaluate_zone(
 
 def train_fold(
     fold_idx: int,
-    dataset_full: TibialTrayDataset,
+    base_samples: list,
+    images_dir: Path,
     epochs: int,
     device: torch.device,
     models_dir: Path,
     dry_run: bool = False,
     progress_file: str = None,
     total_folds: int = 1,
-) -> dict:
+    checkpoint_file: str = None,
+    stop_file: str = None,
+    resume_zone: int = 0,
+    resume_epoch: int = 0,
+    resume_heads_state: dict = None,
+    resume_optimizer_state: dict = None,
+    resume_scheduler_state: dict = None,
+    fold_results_partial: dict = None,
+    all_fold_results_so_far: list = None,
+) -> tuple:
     """
     Entrena un fold LOOCV completo: deja la imagen 'fold_idx' como validación.
-    Entrena un HoodNet por cada una de las 10 zonas Hood.
+    Soporta parada graceful (stop_file) y reanudación (resume_*).
 
-    Retorna dict con métricas por zona: {"zona_0": {"exact_match": ..., ...}, ...}
+    Retorna (fold_results, stopped_early):
+      - fold_results   : dict por zona {"zona_0": {metrics}, ...}
+      - stopped_early  : True si se interrumpió por stop_file
     """
-    n = len(dataset_full)
-    train_indices = [i for i in range(n) if i != fold_idx]
-
-    _write_progress(progress_file, {
-        "status":        "training",
-        "phase":         "LOOCV",
-        "current_fold":  fold_idx + 1,
-        "total_folds":   total_folds,
-        "current_epoch": 0,
-        "total_epochs":  2 if dry_run else epochs,
-        "zones_done":    0,
-    })
-
-    # Subconjuntos: train con augmentación, val sin augmentación
-    train_subset = Subset(dataset_full, train_indices)
-    val_subset   = Subset(dataset_full, [fold_idx])
-
-    train_loader = DataLoader(
-        train_subset, batch_size=8, shuffle=True, num_workers=0, drop_last=False
-    )
-    val_loader = DataLoader(
-        val_subset, batch_size=1, shuffle=False, num_workers=0
-    )
+    n             = len(base_samples)
+    train_samples = [base_samples[i] for i in range(n) if i != fold_idx]
+    val_samples   = [base_samples[fold_idx]]
 
     actual_epochs = 2 if dry_run else epochs
-    fold_results  = {}
+    fold_results  = dict(fold_results_partial) if fold_results_partial else {}
+
+    # Parámetros de reanudación activos solo para el primer fold que procesamos
+    _resume_zone  = resume_zone
+    _resume_epoch = resume_epoch
+    _heads_state  = resume_heads_state
+    _opt_state    = resume_optimizer_state
+    _sched_state  = resume_scheduler_state
 
     for zone_idx in range(10):
+        # Saltar zonas ya completadas (sus resultados están en fold_results_partial)
+        if zone_idx < _resume_zone:
+            continue
+
+        # Verificar parada antes de empezar una nueva zona
+        if _should_stop(stop_file):
+            _save_checkpoint(checkpoint_file, {
+                "version": 1,
+                "phase": "loocv",
+                "epochs": epochs,
+                "dry_run": dry_run,
+                "all_fold_results": all_fold_results_so_far or [],
+                "current_fold_idx": fold_idx,
+                "fold_results_partial": fold_results,
+                "current_zone_idx": zone_idx,
+                "completed_epochs": 0,
+                "heads_state": None,
+                "optimizer_state": None,
+                "scheduler_state": None,
+            })
+            _write_progress(progress_file, {
+                "status": "paused",
+                "phase": "LOOCV",
+                "current_fold": fold_idx + 1,
+                "total_folds": total_folds,
+                "current_epoch": 0,
+                "total_epochs": actual_epochs,
+                "current_zone": zone_idx + 1,
+            })
+            print(f"[PAUSED] Checkpoint guardado (fold {fold_idx+1}, zona {zone_idx+1})",
+                  flush=True)
+            return fold_results, True
+
+        _write_progress(progress_file, {
+            "status":        "training",
+            "phase":         "LOOCV",
+            "current_fold":  fold_idx + 1,
+            "total_folds":   total_folds,
+            "current_epoch": _resume_epoch if zone_idx == _resume_zone else 0,
+            "total_epochs":  actual_epochs,
+            "zones_done":    len(fold_results),
+            "current_zone":  zone_idx + 1,
+        })
+
+        # Dataset de recortes específico para esta zona
+        train_ds = ZoneCropDataset(
+            images_dir=str(images_dir),
+            base_samples=train_samples,
+            zone_idx=zone_idx,
+            augment=True,
+            image_size=224,
+            repeat_factor=8,
+        )
+        val_ds = ZoneCropDataset(
+            images_dir=str(images_dir),
+            base_samples=val_samples,
+            zone_idx=zone_idx,
+            augment=False,
+            image_size=224,
+            repeat_factor=1,
+        )
+
+        train_loader = DataLoader(
+            train_ds, batch_size=8, shuffle=True, num_workers=0, drop_last=False
+        )
+        val_loader = DataLoader(
+            val_ds, batch_size=1, shuffle=False, num_workers=0
+        )
+
         # Nuevo modelo y optimizador por zona (cabezas independientes)
         model     = HoodNet().to(device)
         criterion = nn.CrossEntropyLoss(weight=DEFAULT_CLASS_WEIGHTS.to(device))
@@ -211,11 +302,56 @@ def train_fold(
             optimizer, T_max=actual_epochs
         )
 
-        best_val_loss = float("inf")
+        # Restaurar estado si es la zona interrumpida
+        epoch_start = 0
+        if zone_idx == _resume_zone and _heads_state is not None:
+            model.heads.load_state_dict(_heads_state)
+            optimizer.load_state_dict(_opt_state)
+            scheduler.load_state_dict(_sched_state)
+            epoch_start = _resume_epoch
+            print(f"  [resumiendo] fold {fold_idx+1}, zona {zone_idx+1} "
+                  f"desde época {epoch_start+1}", flush=True)
 
-        for epoch in range(actual_epochs):
-            train_one_epoch(model, train_loader, optimizer, criterion, device, zone_idx)
+        ep_label = f"{epoch_start+1}..{actual_epochs}" if epoch_start else str(actual_epochs)
+        print(f"  [fold {fold_idx+1}/{n}] zona {zone_idx+1}/10 — {ep_label} épocas...",
+              flush=True)
+
+        stopped_in_zone = False
+        for epoch in range(epoch_start, actual_epochs):
+            # Verificar parada al inicio de cada época
+            if _should_stop(stop_file):
+                _save_checkpoint(checkpoint_file, {
+                    "version": 1,
+                    "phase": "loocv",
+                    "epochs": epochs,
+                    "dry_run": dry_run,
+                    "all_fold_results": all_fold_results_so_far or [],
+                    "current_fold_idx": fold_idx,
+                    "fold_results_partial": fold_results,
+                    "current_zone_idx": zone_idx,
+                    "completed_epochs": epoch,
+                    "heads_state": model.heads.state_dict(),
+                    "optimizer_state": optimizer.state_dict(),
+                    "scheduler_state": scheduler.state_dict(),
+                })
+                _write_progress(progress_file, {
+                    "status": "paused",
+                    "phase": "LOOCV",
+                    "current_fold": fold_idx + 1,
+                    "total_folds": total_folds,
+                    "current_epoch": epoch,
+                    "total_epochs": actual_epochs,
+                    "current_zone": zone_idx + 1,
+                })
+                print(f"[PAUSED] Checkpoint guardado "
+                      f"(fold {fold_idx+1}, zona {zone_idx+1}, época {epoch})",
+                      flush=True)
+                stopped_in_zone = True
+                break
+
+            loss = train_one_epoch(model, train_loader, optimizer, criterion, device)
             scheduler.step()
+            print(f"    época {epoch+1:3d}/{actual_epochs}  loss={loss:.4f}", flush=True)
             _write_progress(progress_file, {
                 "status":        "training",
                 "phase":         "LOOCV",
@@ -223,20 +359,50 @@ def train_fold(
                 "total_folds":   total_folds,
                 "current_epoch": epoch + 1,
                 "total_epochs":  actual_epochs,
-                "zones_done":    zone_idx,
+                "zones_done":    len(fold_results),
                 "current_zone":  zone_idx + 1,
             })
+            # Guardar checkpoint tras cada época completada
+            _save_checkpoint(checkpoint_file, {
+                "version": 1,
+                "phase": "loocv",
+                "epochs": epochs,
+                "dry_run": dry_run,
+                "all_fold_results": all_fold_results_so_far or [],
+                "current_fold_idx": fold_idx,
+                "fold_results_partial": fold_results,
+                "current_zone_idx": zone_idx,
+                "completed_epochs": epoch + 1,
+                "heads_state": model.heads.state_dict(),
+                "optimizer_state": optimizer.state_dict(),
+                "scheduler_state": scheduler.state_dict(),
+            })
 
-        # Evaluación final del fold en la muestra de validación
-        preds, targets = evaluate_zone(model, val_loader, device, zone_idx)
+        if stopped_in_zone:
+            return fold_results, True
+
+        # Evaluación final de la zona en la muestra de validación
+        preds, targets = evaluate_zone(model, val_loader, device)
         metrics = compute_metrics(preds, targets)
         fold_results[f"zona_{zone_idx}"] = metrics
+        em_zone = np.mean([metrics["exact_match"]] if isinstance(metrics["exact_match"], float)
+                          else metrics["exact_match"])
+        print(f"  [fold {fold_idx+1}/{n}] zona {zone_idx+1}/10 — exact_match={em_zone:.3f}",
+              flush=True)
 
-    img_name = dataset_full.samples[fold_idx][0]
+        # Tras completar la primera zona reanudada, resetear parámetros de reanudación
+        _resume_zone  = zone_idx + 1
+        _resume_epoch = 0
+        _heads_state  = None
+        _opt_state    = None
+        _sched_state  = None
+
+    img_name = base_samples[fold_idx][0]
     em_mean  = np.mean([v["exact_match"] for v in fold_results.values()])
-    print(f"  fold {fold_idx+1:02d}/{n} [{img_name}]  exact_match_medio={em_mean:.3f}")
+    print(f"  fold {fold_idx+1:02d}/{n} [{img_name}]  exact_match_medio={em_mean:.3f}",
+          flush=True)
 
-    return fold_results
+    return fold_results, False
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -244,24 +410,42 @@ def train_fold(
 # ─────────────────────────────────────────────────────────────────────────────
 
 def train_final_model(
-    dataset_full: TibialTrayDataset,
+    base_samples: list,
+    images_dir: Path,
     epochs: int,
     device: torch.device,
     models_dir: Path,
     progress_file: str = None,
-) -> None:
+    checkpoint_file: str = None,
+    stop_file: str = None,
+    start_epoch: int = 0,
+    heads_state: dict = None,
+    optimizer_state: dict = None,
+    scheduler_state: dict = None,
+    all_fold_results: list = None,
+) -> bool:
     """
     Entrena el modelo final usando TODAS las imágenes disponibles.
-    Este modelo se exportará a ONNX para el servidor de producción.
+    Soporta parada graceful y reanudación desde una época concreta.
 
-    Se entrena UN único HoodNet evaluado sobre TODAS las zonas en cada epoch
-    (más eficiente que 10 modelos separados para producción).
+    Retorna True si se detuvo antes de completar.
     """
     print("\n[INFO] Entrenando modelo final con todo el dataset...")
 
-    loader = DataLoader(
-        dataset_full, batch_size=8, shuffle=True, num_workers=0, drop_last=False
-    )
+    # Pre-crear datasets/loaders para las 10 zonas (fuera del bucle de épocas)
+    zone_loaders = []
+    for zone_idx in range(10):
+        ds = ZoneCropDataset(
+            images_dir=str(images_dir),
+            base_samples=base_samples,
+            zone_idx=zone_idx,
+            augment=True,
+            image_size=224,
+            repeat_factor=8,
+        )
+        zone_loaders.append(
+            DataLoader(ds, batch_size=8, shuffle=True, num_workers=0, drop_last=False)
+        )
 
     model     = HoodNet().to(device)
     criterion = nn.CrossEntropyLoss(weight=DEFAULT_CLASS_WEIGHTS.to(device))
@@ -270,11 +454,38 @@ def train_final_model(
     )
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
 
-    for epoch in range(epochs):
-        # Entrenar sobre todas las zonas en cada epoch
+    # Restaurar estado si se reanuda
+    if heads_state is not None:
+        model.heads.load_state_dict(heads_state)
+        optimizer.load_state_dict(optimizer_state)
+        scheduler.load_state_dict(scheduler_state)
+        print(f"[resumiendo] Modelo final desde época {start_epoch+1}", flush=True)
+
+    for epoch in range(start_epoch, epochs):
+        # Verificar parada al inicio de cada época
+        if _should_stop(stop_file):
+            _save_checkpoint(checkpoint_file, {
+                "version": 1,
+                "phase": "final",
+                "epochs": epochs,
+                "completed_epochs": epoch,
+                "heads_state": model.heads.state_dict(),
+                "optimizer_state": optimizer.state_dict(),
+                "scheduler_state": scheduler.state_dict(),
+                "all_fold_results": all_fold_results or [],
+            })
+            _write_progress(progress_file, {
+                "status": "paused",
+                "phase": "final",
+                "current_epoch": epoch,
+                "total_epochs": epochs,
+            })
+            print(f"[PAUSED] Checkpoint guardado (modelo final, época {epoch})", flush=True)
+            return True
+
         epoch_losses = []
-        for zone_idx in range(10):
-            loss = train_one_epoch(model, loader, optimizer, criterion, device, zone_idx)
+        for loader in zone_loaders:
+            loss = train_one_epoch(model, loader, optimizer, criterion, device)
             epoch_losses.append(loss)
         scheduler.step()
 
@@ -288,13 +499,32 @@ def train_final_model(
             "loss":          float(np.mean(epoch_losses)),
         })
         if (epoch + 1) % 10 == 0 or epoch == 0:
-            print(f"  Epoch {epoch+1:3d}/{epochs} — loss media: {np.mean(epoch_losses):.4f}")
+            print(f"  Epoch {epoch+1:3d}/{epochs} — loss media: {np.mean(epoch_losses):.4f}",
+                  flush=True)
 
-    # Guardar modelo final
+        # Guardar checkpoint tras cada época completada
+        _save_checkpoint(checkpoint_file, {
+            "version": 1,
+            "phase": "final",
+            "epochs": epochs,
+            "completed_epochs": epoch + 1,
+            "heads_state": model.heads.state_dict(),
+            "optimizer_state": optimizer.state_dict(),
+            "scheduler_state": scheduler.state_dict(),
+            "all_fold_results": all_fold_results or [],
+        })
+
     save_path = models_dir / "hoodnet_final.pt"
     torch.save(model.state_dict(), save_path)
+    # Borrar checkpoint al completar
+    if checkpoint_file:
+        try:
+            Path(checkpoint_file).unlink(missing_ok=True)
+        except Exception:
+            pass
     _write_progress(progress_file, {"status": "done", "model_path": str(save_path)})
     print(f"[OK] Modelo final guardado: {save_path}")
+    return False
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -333,7 +563,24 @@ def main():
         "--progress-file", type=str, default=None,
         help="Ruta a un archivo JSON donde se escribe el progreso (usado por la webapp)",
     )
+    parser.add_argument(
+        "--checkpoint-file", type=str, default=None,
+        help="Ruta al archivo .pt de checkpoint para pausar/reanudar el entrenamiento",
+    )
+    parser.add_argument(
+        "--stop-file", type=str, default=None,
+        help="Fichero bandera: si existe, el entrenamiento se pausa y guarda checkpoint",
+    )
+    parser.add_argument(
+        "--resume", action="store_true",
+        help="Reanudar el entrenamiento desde el checkpoint indicado por --checkpoint-file",
+    )
     args = parser.parse_args()
+
+    # Forzar line-buffering en stdout para que los print() aparezcan
+    # inmediatamente en el log (cuando stdout no es una TTY, Python
+    # usa full-buffering por defecto y los mensajes se acumulan en memoria).
+    sys.stdout.reconfigure(line_buffering=True)
 
     # Resolver rutas relativas al directorio train/
     train_dir        = Path(__file__).resolve().parent
@@ -341,6 +588,9 @@ def main():
     annotations_path = (train_dir / args.annotations).resolve()
     models_dir       = (train_dir / args.models_dir).resolve()
     models_dir.mkdir(parents=True, exist_ok=True)
+
+    checkpoint_file = str((Path(args.checkpoint_file)).resolve()) if args.checkpoint_file else None
+    stop_file       = str((Path(args.stop_file)).resolve())       if args.stop_file       else None
 
     print("=" * 60)
     print("HOOD NN — Entrenamiento HoodNet")
@@ -367,45 +617,117 @@ def main():
     device = torch.device("cpu")
     print(f"[INFO] Dispositivo: {device}")
 
-    # Dataset completo con augmentación para entrenamiento
+    # Cargar lista base de imágenes únicas con landmarks completos
     try:
-        dataset_full = TibialTrayDataset(
-            images_dir=str(images_dir),
-            annotations_path=str(annotations_path),
-            augment=True,
-            image_size=224,
+        base_samples = load_base_samples(
+            images_dir=images_dir,
+            annotations_path=annotations_path,
+            only_aE=True,
         )
-    except RuntimeError as e:
+    except Exception as e:
         print(f"[ERROR] {e}")
         sys.exit(1)
 
-    n = len(dataset_full)
-    print(f"[INFO] Dataset: {n} imágenes cargadas\n")
+    if not base_samples:
+        print("[ERROR] No se encontraron imágenes válidas con landmarks completos.")
+        sys.exit(1)
+
+    n = len(base_samples)
+    print(f"[INFO] Imágenes únicas con landmarks: {n}")
+    print(f"[INFO] Muestras de recorte por época (10 zonas × {n} × 8 repeats): "
+          f"{10 * n * 8}\n")
+
+    # Cargar checkpoint si se reanuda
+    ckpt = None
+    if args.resume and checkpoint_file:
+        ckpt = _load_checkpoint(checkpoint_file)
+        if ckpt is None:
+            print("[INFO] No se encontró checkpoint, iniciando desde cero.")
+        else:
+            phase = ckpt.get("phase", "?")
+            fi    = ckpt.get("current_fold_idx", 0) + 1
+            zi    = ckpt.get("current_zone_idx", 0) + 1
+            ep    = ckpt.get("completed_epochs", 0)
+            print(f"[INFO] Reanudando desde checkpoint: fase={phase}, "
+                  f"fold={fi}, zona={zi}, época completada={ep}")
 
     # ── LOOCV ────────────────────────────────────────────────────────────────
+    all_fold_results = []
     if not args.skip_loocv:
         folds_to_run = list([0] if args.dry_run else range(n))
         print(f"[INFO] Iniciando LOOCV ({len(folds_to_run)} folds)...")
+
+        # Parámetros de reanudación LOOCV
+        start_fold_idx       = 0
+        resume_zone          = 0
+        resume_epoch         = 0
+        fold_results_partial = None
+        heads_state          = None
+        opt_state            = None
+        sched_state          = None
+
+        if ckpt and ckpt.get("phase") == "loocv":
+            all_fold_results     = list(ckpt.get("all_fold_results", []))
+            start_fold_idx       = ckpt.get("current_fold_idx", 0)
+            resume_zone          = ckpt.get("current_zone_idx", 0)
+            resume_epoch         = ckpt.get("completed_epochs", 0)
+            fold_results_partial = ckpt.get("fold_results_partial", {})
+            heads_state          = ckpt.get("heads_state")
+            opt_state            = ckpt.get("optimizer_state")
+            sched_state          = ckpt.get("scheduler_state")
+            print(f"[INFO] Reanudando LOOCV: fold {start_fold_idx+1}, "
+                  f"zona {resume_zone+1}, época {resume_epoch+1}")
+
         _write_progress(args.progress_file, {
-            "status":      "training",
-            "phase":       "LOOCV",
-            "total_folds": len(folds_to_run),
+            "status":       "training",
+            "phase":        "LOOCV",
+            "total_folds":  len(folds_to_run),
             "total_epochs": args.epochs,
         })
 
-        all_fold_results = []
+        loocv_stopped = False
         for fold_idx in folds_to_run:
-            fold_results = train_fold(
+            if fold_idx < start_fold_idx:
+                # Fold ya completado (sus resultados están en all_fold_results del checkpoint)
+                continue
+
+            fold_results, stopped = train_fold(
                 fold_idx=fold_idx,
-                dataset_full=dataset_full,
+                base_samples=base_samples,
+                images_dir=images_dir,
                 epochs=args.epochs,
                 device=device,
                 models_dir=models_dir,
                 dry_run=args.dry_run,
                 progress_file=args.progress_file,
                 total_folds=len(folds_to_run),
+                checkpoint_file=checkpoint_file,
+                stop_file=stop_file,
+                resume_zone=resume_zone          if fold_idx == start_fold_idx else 0,
+                resume_epoch=resume_epoch         if fold_idx == start_fold_idx else 0,
+                resume_heads_state=heads_state    if fold_idx == start_fold_idx else None,
+                resume_optimizer_state=opt_state  if fold_idx == start_fold_idx else None,
+                resume_scheduler_state=sched_state if fold_idx == start_fold_idx else None,
+                fold_results_partial=fold_results_partial if fold_idx == start_fold_idx else None,
+                all_fold_results_so_far=all_fold_results,
             )
+
+            if stopped:
+                loocv_stopped = True
+                break
+
             all_fold_results.append(fold_results)
+            # Resetear parámetros de reanudación tras el primer fold procesado
+            resume_zone          = 0
+            resume_epoch         = 0
+            fold_results_partial = None
+            heads_state          = None
+            opt_state            = None
+            sched_state          = None
+
+        if loocv_stopped:
+            print("\n[PAUSED] Entrenamiento pausado. Usa 'Reanudar' en la app para continuar.")
+            sys.exit(0)
 
         # Resumen LOOCV
         if not args.dry_run:
@@ -413,9 +735,9 @@ def main():
             print("RESUMEN LOOCV")
             print("=" * 60)
             for zone_idx in range(10):
-                key     = f"zona_{zone_idx}"
-                ems     = [r[key]["exact_match"] for r in all_fold_results]
-                maes    = [r[key]["mae_per_damage"]["_global"] for r in all_fold_results]
+                key  = f"zona_{zone_idx}"
+                ems  = [r[key]["exact_match"] for r in all_fold_results]
+                maes = [r[key]["mae_per_damage"]["_global"] for r in all_fold_results]
                 print(
                     f"  {key}: exact_match={np.mean(ems):.3f}±{np.std(ems):.3f}  "
                     f"MAE={np.mean(maes):.3f}"
@@ -429,13 +751,39 @@ def main():
 
     # ── Modelo final para producción ──────────────────────────────────────────
     if not args.dry_run:
-        train_final_model(
-            dataset_full=dataset_full,
+        # Parámetros de reanudación modelo final
+        final_start_epoch = 0
+        final_heads_state = None
+        final_opt_state   = None
+        final_sched_state = None
+
+        if ckpt and ckpt.get("phase") == "final":
+            final_start_epoch = ckpt.get("completed_epochs", 0)
+            final_heads_state = ckpt.get("heads_state")
+            final_opt_state   = ckpt.get("optimizer_state")
+            final_sched_state = ckpt.get("scheduler_state")
+            print(f"[INFO] Reanudando modelo final desde época {final_start_epoch+1}")
+
+        stopped = train_final_model(
+            base_samples=base_samples,
+            images_dir=images_dir,
             epochs=args.epochs,
             device=device,
             models_dir=models_dir,
             progress_file=args.progress_file,
+            checkpoint_file=checkpoint_file,
+            stop_file=stop_file,
+            start_epoch=final_start_epoch,
+            heads_state=final_heads_state,
+            optimizer_state=final_opt_state,
+            scheduler_state=final_sched_state,
+            all_fold_results=all_fold_results,
         )
+
+        if stopped:
+            print("\n[PAUSED] Entrenamiento pausado. Usa 'Reanudar' en la app para continuar.")
+            sys.exit(0)
+
         print("\n[OK] Entrenamiento completado.")
         print("     Siguiente paso: python train/export_onnx.py")
     else:
@@ -444,4 +792,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n[STOPPED] Entrenamiento interrumpido por el usuario.")
