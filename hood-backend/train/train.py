@@ -86,12 +86,13 @@ def _should_stop(stop_file) -> bool:
 DEFAULT_CLASS_WEIGHTS = torch.tensor([0.5, 1.5, 2.0, 3.0])
 
 # Hiperparámetros de entrenamiento optimizados para dataset pequeño (≈13 muestras)
-# weight_decay=1e-2  : regularización L2 fuerte — evita overfitting en cabezas lineales
-#                      con solo ~96 crops de entrenamiento por zona
-# label_smoothing=0.1: suaviza las distribuciones objetivo → mejor calibración
-LR             = 1e-3
-WEIGHT_DECAY   = 1e-2
-LABEL_SMOOTHING = 0.1
+# weight_decay=5e-3  : regularización L2 moderada-alta — evita overfitting sin
+#                      competir demasiado con el gradiente (1e-2 causaba oscilación)
+# label_smoothing=0.05: suaviza objetivos levemente — 0.1 subía demasiado el mínimo
+#                       teórico de la loss (~×7 cabezas) haciendo la curva ilegible
+LR              = 1e-3
+WEIGHT_DECAY    = 5e-3
+LABEL_SMOOTHING = 0.05
 
 
 # ─────────────────────────────────────────────────────────────────────────────
