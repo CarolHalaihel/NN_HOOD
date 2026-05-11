@@ -85,6 +85,14 @@ def _should_stop(stop_file) -> bool:
 # [score_0, score_1, score_2, score_3]
 DEFAULT_CLASS_WEIGHTS = torch.tensor([0.5, 1.5, 2.0, 3.0])
 
+# Hiperparámetros de entrenamiento optimizados para dataset pequeño (≈13 muestras)
+# weight_decay=1e-2  : regularización L2 fuerte — evita overfitting en cabezas lineales
+#                      con solo ~96 crops de entrenamiento por zona
+# label_smoothing=0.1: suaviza las distribuciones objetivo → mejor calibración
+LR             = 1e-3
+WEIGHT_DECAY   = 1e-2
+LABEL_SMOOTHING = 0.1
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # MÉTRICAS
@@ -294,9 +302,12 @@ def train_fold(
 
         # Nuevo modelo y optimizador por zona (cabezas independientes)
         model     = HoodNet().to(device)
-        criterion = nn.CrossEntropyLoss(weight=DEFAULT_CLASS_WEIGHTS.to(device))
+        criterion = nn.CrossEntropyLoss(
+            weight=DEFAULT_CLASS_WEIGHTS.to(device),
+            label_smoothing=LABEL_SMOOTHING,
+        )
         optimizer = torch.optim.AdamW(
-            model.heads.parameters(), lr=1e-3, weight_decay=1e-4
+            model.heads.parameters(), lr=LR, weight_decay=WEIGHT_DECAY
         )
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer, T_max=actual_epochs
@@ -448,9 +459,12 @@ def train_final_model(
         )
 
     model     = HoodNet().to(device)
-    criterion = nn.CrossEntropyLoss(weight=DEFAULT_CLASS_WEIGHTS.to(device))
+    criterion = nn.CrossEntropyLoss(
+        weight=DEFAULT_CLASS_WEIGHTS.to(device),
+        label_smoothing=LABEL_SMOOTHING,
+    )
     optimizer = torch.optim.AdamW(
-        model.heads.parameters(), lr=1e-3, weight_decay=1e-4
+        model.heads.parameters(), lr=LR, weight_decay=WEIGHT_DECAY
     )
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
 
