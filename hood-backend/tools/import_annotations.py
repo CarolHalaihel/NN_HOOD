@@ -40,8 +40,8 @@ import pandas as pd
 LANDMARK_NAMES = ["TL", "TR", "BL", "BR", "MC", "LC", "IG"]
 
 DAMAGE_TYPES = [
-    "delaminacion", "abrasion",    "rayado",      "brunido",
-    "picado",       "residuos",    "deformacion",
+    "rayado",       "picado",      "brunido",     "abrasion",
+    "delaminacion", "deformacion", "residuos",
 ]
 
 NUM_ZONES   = 10

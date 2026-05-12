@@ -11,6 +11,12 @@ Decisión de arquitectura:
     localización espacial precisa (heatmaps gaussianos).
 """
 
+import site as _site
+import sys as _sys
+_usp = _site.getusersitepackages()
+if _usp not in _sys.path:
+    _sys.path.insert(0, _usp)
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F

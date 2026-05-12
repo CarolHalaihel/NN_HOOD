@@ -17,6 +17,7 @@ Uso:
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -361,18 +362,27 @@ def train_fold(
                 stopped_in_zone = True
                 break
 
+            _epoch_t0 = time.monotonic()
             loss = train_one_epoch(model, train_loader, optimizer, criterion, device)
             scheduler.step()
+            _epoch_dur = time.monotonic() - _epoch_t0
             print(f"    época {epoch+1:3d}/{actual_epochs}  loss={loss:.4f}", flush=True)
+            _remaining_loocv = (
+                (actual_epochs - (epoch + 1))
+                + (10 - (zone_idx + 1)) * actual_epochs
+                + (total_folds - (fold_idx + 1)) * 10 * actual_epochs
+            )
             _write_progress(progress_file, {
-                "status":        "training",
-                "phase":         "LOOCV",
-                "current_fold":  fold_idx + 1,
-                "total_folds":   total_folds,
-                "current_epoch": epoch + 1,
-                "total_epochs":  actual_epochs,
-                "zones_done":    len(fold_results),
-                "current_zone":  zone_idx + 1,
+                "status":           "training",
+                "phase":            "LOOCV",
+                "current_fold":     fold_idx + 1,
+                "total_folds":      total_folds,
+                "current_epoch":    epoch + 1,
+                "total_epochs":     actual_epochs,
+                "zones_done":       len(fold_results),
+                "current_zone":     zone_idx + 1,
+                "epoch_duration_s": round(_epoch_dur, 2),
+                "eta_s":            round(_remaining_loocv * _epoch_dur, 1),
             })
             # Guardar checkpoint tras cada época completada
             _save_checkpoint(checkpoint_file, {
@@ -498,20 +508,24 @@ def train_final_model(
             print(f"[PAUSED] Checkpoint guardado (modelo final, época {epoch})", flush=True)
             return True
 
+        _epoch_t0 = time.monotonic()
         epoch_losses = []
         for loader in zone_loaders:
             loss = train_one_epoch(model, loader, optimizer, criterion, device)
             epoch_losses.append(loss)
         scheduler.step()
+        _epoch_dur = time.monotonic() - _epoch_t0
 
         _write_progress(progress_file, {
-            "status":        "training",
-            "phase":         "final",
-            "current_fold":  1,
-            "total_folds":   1,
-            "current_epoch": epoch + 1,
-            "total_epochs":  epochs,
-            "loss":          float(np.mean(epoch_losses)),
+            "status":           "training",
+            "phase":            "final",
+            "current_fold":     1,
+            "total_folds":      1,
+            "current_epoch":    epoch + 1,
+            "total_epochs":     epochs,
+            "loss":             float(np.mean(epoch_losses)),
+            "epoch_duration_s": round(_epoch_dur, 2),
+            "eta_s":            round((epochs - (epoch + 1)) * _epoch_dur, 1),
         })
         if (epoch + 1) % 10 == 0 or epoch == 0:
             print(f"  Epoch {epoch+1:3d}/{epochs} — loss media: {np.mean(epoch_losses):.4f}",

@@ -196,6 +196,18 @@ def read_progress() -> dict:
     return {}
 
 
+def _fmt_eta(seconds: float) -> str:
+    """Convierte segundos a texto legible: 1h 23m 45s."""
+    seconds = max(0, int(seconds))
+    h, rem = divmod(seconds, 3600)
+    m, s   = divmod(rem, 60)
+    if h > 0:
+        return f"{h}h {m:02d}m {s:02d}s"
+    if m > 0:
+        return f"{m}m {s:02d}s"
+    return f"{s}s"
+
+
 def read_log_tail(n_lines: int = 25) -> str:
     """Lee las últimas N líneas del log de entrenamiento."""
     if LOG_FILE.exists():
@@ -1473,14 +1485,26 @@ with tab_train:
         elif status == "training":
             if phase == "LOOCV":
                 fold_pct = (cur_fold - 1 + (cur_ep / max(tot_ep, 1))) / max(tot_folds, 1)
-                label    = f"LOOCV  Fold {cur_fold}/{tot_folds}  ·  poca {cur_ep}/{tot_ep}  ·  Zona {cur_zone}/10"
+                label    = f"LOOCV  Fold {cur_fold}/{tot_folds}  ·  Época {cur_ep}/{tot_ep}  ·  Zona {cur_zone}/10"
             else:
                 fold_pct = cur_ep / max(tot_ep, 1)
-                label    = f"Modelo final  poca {cur_ep}/{tot_ep}"
+                label    = f"Modelo final  Época {cur_ep}/{tot_ep}"
 
             st.progress(min(fold_pct, 1.0), text=label)
+
+            # ── Velocidad y ETA ────────────────────────────────────────────
+            epoch_dur = progress.get("epoch_duration_s")
+            eta_s     = progress.get("eta_s")
+            _met_cols = st.columns(3)
+            if epoch_dur is not None:
+                speed_label = (f"{epoch_dur:.1f} s/época"
+                               if epoch_dur >= 1
+                               else f"{epoch_dur * 1000:.0f} ms/época")
+                _met_cols[0].metric("⚡ Velocidad", speed_label)
+            if eta_s is not None:
+                _met_cols[1].metric("⏳ Tiempo restante", _fmt_eta(eta_s))
             if loss_val is not None:
-                st.metric("Pérdida", f"{loss_val:.4f}")
+                _met_cols[2].metric("📉 Pérdida", f"{loss_val:.4f}")
 
         elif status == "starting":
             st.info("⏳ Iniciando...")

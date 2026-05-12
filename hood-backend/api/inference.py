@@ -32,8 +32,8 @@ sys.path.insert(0, str(ROOT))
 from api.zone_computer import HoodZoneComputer, ZONE_NAMES, LANDMARK_NAMES
 
 DAMAGE_TYPES = [
-    "delaminacion", "abrasion",    "rayado",      "brunido",
-    "picado",       "residuos",    "deformacion",
+    "rayado",       "picado",      "brunido",     "abrasion",
+    "delaminacion", "deformacion", "residuos",
 ]
 
 # Parámetros de normalización ImageNet (deben coincidir con dataset.py)
@@ -390,3 +390,120 @@ class HoodInferenceEngine:
             "landmarks":          lm,
             "zone_scores_matrix": scores_matrix,
         }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# VISUALIZACIÓN — OVERLAY DE DAÑO SOBRE LA IMAGEN ORIGINAL
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Color RGB por tipo de daño (7 colores distintos)
+_DAMAGE_COLOR_RGB = {
+    "rayado":       (255,  80,  80),   # rojo
+    "picado":       (255, 165,   0),   # naranja
+    "brunido":      (255, 230,   0),   # amarillo
+    "abrasion":     ( 60, 200,  60),   # verde
+    "delaminacion": ( 60, 160, 255),   # azul claro
+    "deformacion":  (180,  60, 255),   # violeta
+    "residuos":     ( 60, 230, 200),   # cyan
+}
+
+# Grosor del borde según severidad
+_SEV_THICKNESS = {1: 2, 2: 4, 3: 7}
+
+# Nombres cortos para etiquetas
+_DAMAGE_SHORT = {
+    "rayado": "ray", "picado": "pic", "brunido": "bru", "abrasion": "abr",
+    "delaminacion": "del", "deformacion": "def", "residuos": "res",
+}
+_SEVERITY_LABEL = {1: "1-leve", 2: "2-mod", 3: "3-sev"}
+
+
+def draw_damage_overlay(
+    image_rgb: np.ndarray,
+    result: dict,
+    landmarks: Optional[dict] = None,
+    min_score: int = 1,
+    alpha: float = 0.15,
+) -> np.ndarray:
+    """
+    Dibuja un rectángulo por cada (zona × tipo_de_daño) activo.
+
+    - Color del rectángulo → tipo de daño (7 colores fijos, ver _DAMAGE_COLOR_RGB)
+    - Grosor del borde     → severidad: fino=leve(1), medio=mod(2), grueso=sev(3)
+    - Relleno semitransparente del mismo color
+    - Si hay varios daños en la misma zona, cada rect se retranquea 5 px
+      hacia el interior para que todos sean visibles
+    - Etiqueta en esquina superior izquierda: "ray 2-mod" (color del daño)
+    - Landmarks como puntos cyan con nombre
+    """
+    img     = image_rgb.copy()
+    overlay = img.copy()
+
+    lm = landmarks or result.get("landmarks", {})
+    if not lm:
+        return img
+    try:
+        zc = HoodZoneComputer(lm)
+    except Exception:
+        return img
+
+    zones_data = result.get("zones", {})
+    font       = cv2.FONT_HERSHEY_SIMPLEX
+    fs         = max(0.30, min(image_rgb.shape[:2]) / 1600)
+    lbl_th     = max(1, int(fs * 2))
+
+    for zone_idx, zone_name in enumerate(ZONE_NAMES):
+        scores = zones_data.get(zone_name, {})
+        # Daños activos ordenados de mayor a menor severidad
+        active = sorted(
+            [(dmg, sc) for dmg, sc in scores.items() if sc >= min_score],
+            key=lambda x: -x[1],
+        )
+        if not active:
+            continue
+
+        x1b, y1b, x2b, y2b = zc.get_zone_bbox(zone_idx)
+        x1b = max(0, x1b); y1b = max(0, y1b)
+        x2b = min(img.shape[1] - 1, x2b); y2b = min(img.shape[0] - 1, y2b)
+        if x2b <= x1b or y2b <= y1b:
+            continue
+
+        for draw_i, (dmg, sev) in enumerate(active):
+            # Retranqueo: cada daño adicional 5 px hacia el interior
+            inset = draw_i * 5
+            x1 = x1b + inset; y1 = y1b + inset
+            x2 = x2b - inset; y2 = y2b - inset
+            if x2 <= x1 + 4 or y2 <= y1 + 4:
+                continue
+
+            r, g, b   = _DAMAGE_COLOR_RGB.get(dmg, (200, 200, 200))
+            color_bgr = (b, g, r)                      # OpenCV usa BGR
+            bord_th   = _SEV_THICKNESS.get(sev, 2)
+
+            # Relleno semitransparente sobre overlay
+            cv2.rectangle(overlay, (x1, y1), (x2, y2), color_bgr, -1)
+            # Borde sólido cuyo grosor indica la severidad
+            cv2.rectangle(img,     (x1, y1), (x2, y2), color_bgr, bord_th)
+
+            # Etiqueta interior: "ray 2-mod"
+            label = f"{_DAMAGE_SHORT.get(dmg, dmg)} {_SEVERITY_LABEL.get(sev, str(sev))}"
+            (tw, th), _ = cv2.getTextSize(label, font, fs, lbl_th)
+            ty = y1 + th + 3
+            # Fondo negro detrás del texto
+            cv2.rectangle(img, (x1 + 2, y1 + 1), (x1 + tw + 6, y1 + th + 6),
+                          (0, 0, 0), -1)
+            cv2.putText(img, label, (x1 + 4, ty), font, fs,
+                        (r, g, b), lbl_th, cv2.LINE_AA)
+
+    # Mezclar relleno semitransparente
+    cv2.addWeighted(overlay, alpha, img, 1 - alpha, 0, img)
+
+    # Landmarks como puntos cyan con nombre
+    if lm:
+        for name, coords in lm.items():
+            cx, cy = int(coords[0]), int(coords[1])
+            cv2.circle(img, (cx, cy), max(5, lbl_th * 3), (0, 210, 255), -1)
+            cv2.putText(img, name, (cx + 6, cy - 4), font, fs * 0.85,
+                        (0, 210, 255), max(1, lbl_th - 1), cv2.LINE_AA)
+
+    return img

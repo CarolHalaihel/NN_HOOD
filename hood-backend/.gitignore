@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Archivos temporales / de proceso
+models/training.pid
+models/training_stop.flag
+*.orig
+
+# Entorno virtual
+.venv/
+venv/
+env/
